@@ -133,4 +133,4 @@ def respond_ai(message, history):
 #----------------------------------
 # Launch Gradio Interface
 #----------------------------------
-gr.ChatInterface(fn=respond_ai).launch(inbrowser=True)
+gr.ChatInterface(fn=respond_ai, title="Shruti Vargantwar's Digital Twin").launch(server_name="0.0.0.0", server_port=int(os.environ.get("PORT", 7860)))
