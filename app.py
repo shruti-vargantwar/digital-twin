@@ -1,18 +1,21 @@
 import os
 from openai import OpenAI
 import gradio as gr
-
-#----------------------------------
+import re
+import uuid
+import chromadb
+from pprint import pprint
+#-------------------------------------------------
 # Setup
-#----------------------------------
+#-------------------------------------------------
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 if OPENAI_API_KEY is None:
     raise Exception("API key is missing.")
 client = OpenAI()
 
-#----------------------------------
-# Document
-#----------------------------------
+#--------------------------------------------------
+# Documents #
+#--------------------------------------------------
 document_overview = """
 Name: Shruti Vargantwar
 
@@ -96,9 +99,208 @@ Additional info:
 - Shruti has a particular fondness for Indian and Thai cuisine, often exploring traditional dishes from these cultures.
 """
 
-#----------------------------------
+document_education = """
+Education
+Maharashtra Institute of Technology College of Engineering
+
+Bachelor of Engineering (B.E.), Computer Engineering
+
+University of North Carolina at Charlotte logo
+University of North Carolina at Charlotte
+
+Master of Science (MS), Computer Science
+"""
+
+document_professional_experience = """
+Experience
+
+T-Mobile logo
+Software Engineer
+
+T-Mobile · Full-time
+
+Jan 2022 - Mar 2026 · 4 yrs 3 mos
+
+Frisco, Texas, United States · Hybrid
+
+- As Interim Team Lead, contributed to the design and implementation of customer order workflows supporting new product purchases, plan changes, bundled offerings, and enterprise provisioning across a microservices architecture. Recognized with a Spot Bonus Award.
+- Built full stack features across the application: developed Angular/TypeScript UI components and shared libraries for enterprise order portals, along with Java/Spring Boot microservices for order validation, submission, and downstream integrations.
+- Contributed to a migration from Event Hub to Azure Service Bus, incorporating dead-letter queues, duplicate detection, and retry policies, which reduced message loss and improved order reliability and traceability.
+- Helped lead a migration from Excel-based Drools rule management to a Camunda-driven orchestration engine using DMN decision tables, resulting in a more configurable and maintainable rules service.
+- Mentored and supported T-Mobile employees and onshore/offshore contractors to help bridge capability gaps and support delivery of key initiatives.
+
+Skills/Tools: Java, Spring Boot, MongoDB, TypeScript, Angular, Azure Service Bus, Camunda, Git, JUnit
+
+Cerner Corporation logo
+Software Engineer II
+
+Cerner Corporation · Full-time
+
+Nov 2018 - Dec 2021 · 3 yrs 2 mos
+
+Kansas City Metropolitan Area · On-site
+
+- Designed and developed Java REST services processing claims, provider transactions, and payer remits while integrating with an enterprise pricing engine to determine reimbursement amounts for bundled episodes of care.
+- Owned team's defect triage and support process, resolving client issues efficiently while maintaining development timelines; introduced BDD testing that doubled Ruby code coverage; and supported weekly CI/CD releases across Dev, Staging, and Production environments using Jenkins, Spinnaker, and Docker.
+- Mentored new engineers and assisted them with technical queries.
+
+Skills/Tools: Java, Hibernate, SQL, HTML, CSS, JavaScript, React, Ruby on Rails, AWS, Git, Mockito, JUnit, RSpec, Capybara, Selenium
+
+Senior Software Engineer (Associate)
+
+Cerner Healthcare Solutions Private Limited · Full-time
+
+Dec 2014 - Oct 2018 · 3 yrs 11 mos
+
+Bengaluru, Karnataka, India · On-site
+
+- Replaced a manual 15-hour Excel-based import and slow MySQL search across 10 million test plan records by building an automated keyword extraction tool and Elasticsearch-backed search engine, reducing search turnaround time by 60%; extended the same framework to Change Request and Service Request search, and developed a test plan similarity engine to reduce redundant coverage; scaled the solution from a single-team pilot to 20+ solution teams. Recognized with an Excellence Award.
+- Led and supervised a team of developers through design, implementation, and delivery of these platform improvements, collaborating directly with test analysts to iterate on search quality and translate end-user feedback into technical solutions.
+
+Skills/Tools: Python, Django, PHP, Yii, jQuery, JavaScript, HTML, CSS, Git, SQL, Elasticsearch
+
+Cerner Corporation logo
+Software Engineer
+
+Cerner Corporation · Full-time
+
+Sep 2012 - Nov 2014 · 2 yrs 3 mos
+
+Kansas City Metropolitan Area · On-site
+
+- Developed the image annotation feature within CareAware Multimedia Manager, a clinical portal used by physicians and nurses to view, annotate, and manage patient multimedia objects; built and deployed REST APIs on IBM WebSphere to expose object retrieval functionality, tested via Postman.
+- Contributed to a secure framework for handling sensitive medical records by implementing monitoring timers, resolving defects in C# code, and validating functionality through black-box testing using HP Quality Center.
+- Participated in functional design, coding, testing, and troubleshooting; created design documents and participated in code reviews using Crucible.
+
+Skills/Tools: VB 6.0, C#, Java, IBM WebSphere
+"""
+
+#--------------------------------------------------
+# Chunking Function
+#--------------------------------------------------
+_SENTENCE_END = re.compile(r'[.!?][)"\']?\s')
+
+def split_text_into_chunks(text, chunk_size=500, overlap=50):
+    """Split text into overlapping chunks, preferring natural boundaries.
+
+    Each chunk is at most `chunk_size` characters and overlaps the previous
+    one by `overlap` characters. When a chunk would end mid-sentence or
+    mid-paragraph, the cut moves back to the nearest natural boundary
+    (paragraph break, newline, sentence end, then space, in that order),
+    but only if that boundary is past the halfway point of the chunk.
+
+    Returns a list of chunk strings.
+    """
+    chunks = []
+    start = 0
+    n = len(text)
+
+    while start < n:
+        end = start + chunk_size
+
+        if end >= n:
+            chunks.append(text[start:n])
+            break
+
+        min_cut = start + chunk_size // 2
+        cut = _find_boundary(text, min_cut, end)
+
+        chunks.append(text[start:cut])
+        start = cut - overlap
+
+    return chunks
+
+
+def _find_boundary(text, min_cut, end):
+    """Return a cut index in [min_cut, end], preferring natural boundaries."""
+    window = text[min_cut:end]
+
+    idx = window.rfind("\n\n")          # 1. paragraph break
+    if idx != -1:
+        return min_cut + idx + 2
+
+    idx = window.rfind("\n")            # 2. single newline
+    if idx != -1:
+        return min_cut + idx + 1
+
+    matches = list(_SENTENCE_END.finditer(window))   # 3. sentence end
+    if matches:
+        return min_cut + matches[-1].end()
+
+    idx = window.rfind(" ")            # 4. space
+    if idx != -1:
+        return min_cut + idx + 1
+
+    return end                        # no boundary: hard cut
+
+
+#--------------------------------------------------
+# RAG: Chunk, Embed & Store in ChromaDB
+#--------------------------------------------------
+
+documents = [
+    {"text": document_overview, "source": "Overview"},
+    {"text": document_education, "source": "Education"},
+    {"text": document_professional_experience, "source": "Professional Experience"},
+]
+
+chunks = []
+ids = []
+metadatas = []
+
+for doc in documents:
+    # Prepare the lists
+    chunks_ = split_text_into_chunks(doc["text"], chunk_size=300, overlap=30)
+    ids_ = [str(uuid.uuid4()) for _ in range(len(chunks_))]
+    metadatas_ = [{"source": doc["source"], "chunk_index": i} for i in range(len(chunks_))]
+    # Add to main lists
+    chunks.extend(chunks_)
+    ids.extend(ids_)
+    metadatas.extend(metadatas_)
+
+# Print for logs
+print(f"Created {len(chunks)} chunks:\n")
+for i, chunk in enumerate(chunks):
+    print(f"Chunk {i+1} (ID: {ids[i]}, Source: {metadatas[i]['source']}, Index: {metadatas[i]['chunk_index']}, Length: {len(chunk)}):")
+    print(chunk)
+    print()
+    
+#Generate embeddings
+response = client.embeddings.create(
+    model="text-embedding-3-small",
+    input=chunks
+)
+embeddings = [item.embedding for item in response.data]
+
+# Verify embeddings for logs
+print(f"Generated {len(embeddings)} embeddings.")
+print(f"Each embedding has {len(embeddings[0])} dimensions.")
+
+# Initialize ChromaDB and Store Vectors
+
+# Initialize ChromaDB client(persistent storage)
+chroma_client = chromadb.PersistentClient(path="./chroma_db_twin")
+
+# Initialize ChromaDB client (in-memory storage)
+#chroma_client = chromadb.Client()
+# Get or create + empty the collection before adding new data (for testing purposes)
+collection = chroma_client.get_or_create_collection(name="digital_twin", metadata={"description": "Shruti Vargantwar's professional profile and work experience"})
+#Empty the collection before adding new data (for testing purposes)
+if(collection.get()["ids"]):
+    collection.delete(ids=collection.get()["ids"])
+
+# Adding data to ChromaDB
+collection.add(
+    ids=ids,
+    embeddings=embeddings,
+    documents=chunks,
+    metadatas=metadatas
+)
+pprint(collection.get())
+
+#--------------------------------------------------
 # System Message
-#----------------------------------
+#--------------------------------------------------
 system_message = """
 You are a digital twin of Shruti Vargantwar. When people talk to you, you respond AS Shruti would — in first person, using her voice, personality and knowledge.
 Here is the information about Shruti Vargantwar to help you embody her:
@@ -106,17 +308,36 @@ Here is the information about Shruti Vargantwar to help you embody her:
 Important: Do not make up things up. If you don't know the answer, say you don't know. The only factual information you have is what is in the document provided. If you are asked about something that is not in the document, say "I don't know" or "I don't have that information."
 """
 
-#----------------------------------
+#--------------------------------------------------
 # Main Response Function
-#----------------------------------
+#--------------------------------------------------
 def respond_ai(message, history):
-    # Update system message with context (for this conversation turn)
-    system_message_enhanced = system_message + "\n\nContext:\n" + document_overview
+    # RAG: Embed the query using the same model we used for the embedding the chunks
+    response = client.embeddings.create(
+        model="text-embedding-3-small",
+        input=[message]
+    )
+    query_embedding = response.data[0].embedding
+
+    # RAG: Search ChromaDB
+    results = collection.query(
+        query_embeddings=[query_embedding],
+        n_results=3
+    )
+   
+    # RAG: Stitch together the retrieved chunks into a single context string
+    context = "\n\n".join(results['documents'][0])
     
-    # Logs for debugging
+    # Print logs for debugging
     print("\n=====================================\n")
-    print("***User message:\n", message)
-    print("\n*** Context this turn:\n", system_message_enhanced)
+    print(f"User message:\n{message}\n")
+    print("*** Retreived Chunks:")
+    for a, b in zip(results['documents'][0], results['metadatas'][0]):
+        print("-------------------------------------")
+        print(f"<<Document {b['source']} -- Chunk {b['chunk_index']}>>\n{a}\n")
+    
+    # Update system message with context (for this conversation turn)
+    system_message_enhanced = system_message + "\n\nContext:\n" + context
     
     # Build messages for this turn
     messages = [{"role": "system", "content": system_message_enhanced}] + history + [{"role": "user", "content": message}]
@@ -130,7 +351,7 @@ def respond_ai(message, history):
     
     return message.content
 
-#----------------------------------
+#--------------------------------------------------
 # Launch Gradio Interface
-#----------------------------------
-gr.ChatInterface(fn=respond_ai, title="Shruti Vargantwar's Digital Twin").launch(server_name="0.0.0.0", server_port=int(os.environ.get("PORT", 7860)))
+#--------------------------------------------------
+gr.ChatInterface(fn=respond_ai, title="Digital Twin of Shruti").launch(server_name="0.0.0.0", server_port=int(os.environ.get("PORT", 7860)))
