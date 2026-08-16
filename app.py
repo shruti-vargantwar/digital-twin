@@ -5,6 +5,9 @@ import re
 import uuid
 import chromadb
 from pprint import pprint
+import requests
+import random
+import json
 #-------------------------------------------------
 # Setup
 #-------------------------------------------------
@@ -299,6 +302,93 @@ collection.add(
 pprint(collection.get())
 
 #--------------------------------------------------
+# Tools
+#--------------------------------------------------
+tools = []
+pushover_user = os.getenv("PUSHOVER_USER")
+pushover_token = os.getenv("PUSHOVER_TOKEN")
+pushover_url = "https://api.pushover.net/1/messages.json"
+
+# Create send_notification function
+def send_notification(message):
+    payload = {
+        "token": pushover_token,
+        "user": pushover_user,
+        "message": message
+    }
+    requests.post(pushover_url, data=payload)
+
+
+# Describe Pushover as an LLM tool
+send_notification_function = {
+    "name": "send_notification",
+    "description": "Sends a push notification to the real-world version of you via Pushover on mobile. Use this if the user needs to alert the real-word version of you.",
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "message": {
+                "type": "string",
+                "description": "The notification message to send to the  user's device."
+            }
+        },
+        "required": ["message"]
+    }
+}
+
+# Add Pushover to the list of tools for the LLM
+tools.append({"type": "function", "function": send_notification_function})
+
+# Simulates rolling a single six-sided die
+def dice_roll():
+    return random.randint(1, 6)
+
+# Describe the function for the LLM
+roll_dice_function = {
+    "name": "dice_roll",
+    "description": "Simulates rolling a single six-sided die and returns the result. Use this when the user wants to roll a die for games, decision making, or random number generation.",
+    "parameters": {
+        "type": "object",
+        "properties": {},
+        "required": []
+    }
+}
+
+# Add the function to list of tools for the LLM
+tools.append({"type": "function", "function": roll_dice_function})
+
+#--------------------------------------------------
+# Tool Handler
+#--------------------------------------------------
+def handle_tool_call(tool_calls):
+    # Handle all the tool calls in the list
+    tool_results = []
+
+    for tool_call in tool_calls:
+        function_name = tool_call.function.name
+        args = json.loads(tool_call.function.arguments)
+        #print(f"Calling function: {function_name}") # For future debugging
+
+        # Route to the appropriate function based on the function name
+        if function_name == "send_notification":
+            send_notification(args["message"])
+            content = f"Notification sent: {args['message']}"
+        elif function_name == "dice_roll":
+            content = f"Rolled: {dice_roll()}"
+        #elif function_name == "insert_function_3":
+            #content = insert_function_3(args)"
+        else:
+            content = f"Unknown function {function_name}."
+            
+        tool_call_result = {
+            "role": "tool",
+            "content": content,
+            "tool_call_id": tool_call.id,
+        }
+        tool_results.append(tool_call_result)
+
+    return tool_results
+
+#--------------------------------------------------
 # System Message
 #--------------------------------------------------
 system_message = """
@@ -345,9 +435,26 @@ def respond_ai(message, history):
     # Call LLM
     response = client.chat.completions.create(
         model="gpt-4.1-mini",
-        messages=messages
+        messages=messages,
+        tools=tools
     )
     message = response.choices[0].message
+    
+    # Check if model wants to call a tool
+    while message.tool_calls:
+        pprint(message.tool_calls)
+
+        tool_results = handle_tool_call(message.tool_calls)  # whole list of tool calls on purpose, but we only have one tool call in this example.
+        messages.append(message)
+        messages.extend(tool_results)  # Changed from append() to extend() when we switched to multiple tool calls.
+        response = client.chat.completions.create(
+            model="gpt-4.1-mini",
+            messages=messages,
+            tools=tools
+        )
+        message = response.choices[0].message
+
+        # Note: consider adding protection from infinite consecutive tool calling.
     
     return message.content
 
