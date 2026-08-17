@@ -8,6 +8,7 @@ from pprint import pprint
 import requests
 import random
 import json
+
 #-------------------------------------------------
 # Setup
 #-------------------------------------------------
@@ -310,19 +311,24 @@ pushover_token = os.getenv("PUSHOVER_TOKEN")
 pushover_url = "https://api.pushover.net/1/messages.json"
 
 # Create send_notification function
-def send_notification(message):
+def send_notification(message: str):
+    if pushover_user is None or pushover_token is None: # Handling of potential missing environment variables for Pushover
+        return "Notification failed. Pushover not configured."
     payload = {
         "token": pushover_token,
         "user": pushover_user,
         "message": message
     }
     requests.post(pushover_url, data=payload)
+    return f"Notification sent: {message}"
 
 
 # Describe Pushover as an LLM tool
 send_notification_function = {
     "name": "send_notification",
-    "description": "Sends a push notification to the real-world version of you via Pushover on mobile. Use this if the user needs to alert the real-word version of you.",
+    "description": "Sends a push notification to the real Shruti. Use this when: 1) Someone wants to get in touch, hire, or collaborate\
+        - ask for their name and contact details first, then send notification to Shruti with the name and contact details. \
+        2) You don't the answer to a question about Shruti - send AUTOMATICALLY without asking, include the question so we can add this info to the knowledge base later.",
     "parameters": {
         "type": "object",
         "properties": {
@@ -370,8 +376,7 @@ def handle_tool_call(tool_calls):
 
         # Route to the appropriate function based on the function name
         if function_name == "send_notification":
-            send_notification(args["message"])
-            content = f"Notification sent: {args['message']}"
+            content = send_notification(args["message"])
         elif function_name == "dice_roll":
             content = f"Rolled: {dice_roll()}"
         #elif function_name == "insert_function_3":
@@ -395,7 +400,13 @@ system_message = """
 You are a digital twin of Shruti Vargantwar. When people talk to you, you respond AS Shruti would — in first person, using her voice, personality and knowledge.
 Here is the information about Shruti Vargantwar to help you embody her:
 
-Important: Do not make up things up. If you don't know the answer, say you don't know. The only factual information you have is what is in the document provided. If you are asked about something that is not in the document, say "I don't know" or "I don't have that information."
+Important: Do not make up things up. If you don't know an answer, say you don't know. The only factual information you have is what is in the document chunks.
+If you are asked about something that is not in the document, say "I don't know" or "I don't have that information". You cannot get any more facts about
+Shruti from the internet or make them up.
+
+SUPER IMPORTANT: Whenever you don't know something about Shruti,
+ALWAYS use the send_notification tool to send a notification to the real Shruti with the question asked, so she can add this information to your knowledge base later. Do this
+automatically without asking the user for permission.
 """
 
 #--------------------------------------------------
@@ -461,4 +472,4 @@ def respond_ai(message, history):
 #--------------------------------------------------
 # Launch Gradio Interface
 #--------------------------------------------------
-gr.ChatInterface(fn=respond_ai, title="Digital Twin of Shruti").launch(server_name="0.0.0.0", server_port=int(os.environ.get("PORT", 7860)))
+gr.ChatInterface(fn=respond_ai, title="Shruti's Digitl Twin").launch(server_name="0.0.0.0", server_port=int(os.environ.get("PORT", 7860)))
