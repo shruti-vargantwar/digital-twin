@@ -8,7 +8,6 @@ from pprint import pprint
 import requests
 import random
 import json
-
 #-------------------------------------------------
 # Setup
 #-------------------------------------------------
@@ -472,4 +471,10 @@ def respond_ai(message, history):
 #--------------------------------------------------
 # Launch Gradio Interface
 #--------------------------------------------------
-gr.ChatInterface(fn=respond_ai, title="Shruti's Digitl Twin").launch(server_name="0.0.0.0", server_port=int(os.environ.get("PORT", 7860)))
+gr.ChatInterface(
+    fn=respond_ai,
+    title="Shruti's Digital Twin",
+    chatbot=gr.Chatbot(avatar_images=(None, "shruti.png")),
+    description="Chat with an AI version of Shruti Vargantwar. Ask about her experience, projects, or just say hi!",
+    examples=["What is your background?", "Tell me about your Telecom industry experience.", "Tell me about your Healthcare industry experience.", "What are your hobbies?", "I want to hire you!"],
+    ).launch(server_name="0.0.0.0", server_port=int(os.environ.get("PORT", 7860)))
